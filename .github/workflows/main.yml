@@ -6,11 +6,11 @@ on:
       sdk_url:
         description: 'OpenWrt SDK URL'
         required: true
-        default: 'https://downloads.openwrt.org/releases/22.03.3/targets/ramips/mt7620/openwrt-sdk-22.03.3-ramips-mt7620_gcc-11.2.0_musl.Linux-x86_64.tar.xz'
+        default: 'https://downloads.openwrt.org/releases/23.05.0-rc3/targets/ramips/mt7621/openwrt-sdk-23.05.0-rc3-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz'
       ast_version:
         description: 'Asterisk Version'
         required: true
-        default: 'Ast18'
+        default: 'Ast20'
         type: choice
         options:
           - Ast16
@@ -30,10 +30,8 @@ jobs:
 
       - name: Install build dependencies
         run: |
-          # Completely purge needrestart and its apt hooks
           sudo apt-get purge -y needrestart || true
           sudo rm -rf /etc/needrestart /usr/lib/needrestart /etc/apt/apt.conf.d/*needrestart*
-
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             -o Dpkg::Options::="--force-confdef" \
@@ -54,35 +52,45 @@ jobs:
           tar -xf openwrt-sdk.tar.xz --strip-components=1 -C sdk
           cd sdk
           
-          # Update and install feeds
-          ./scripts/feeds update -a || true
-          ./scripts/feeds install -a || true
+          # Update and install telephony feed specifically for Asterisk headers
+          ./scripts/feeds update packages telephony
+          ./scripts/feeds install -p telephony asterisk
           
           # Setup chan-quectel package directory
-          mkdir -p package/telephony/chan-quectel
+          mkdir -p package/chan-quectel
           
-          # Select makefile based on Asterisk version
-          if [ -d "../openwrt/urlmakefile/$AST_VER" ]; then
-            cp -r ../openwrt/urlmakefile/$AST_VER/* package/telephony/chan-quectel/
-          elif [ -d "../openwrt/urlmakefile/current" ]; then
-            cp -r ../openwrt/urlmakefile/current/* package/telephony/chan-quectel/
+          # Locate and copy Makefile directly into package/chan-quectel
+          SRC_MAKEFILE=$(find ../openwrt/urlmakefile/ -name "Makefile" | head -n 1)
+          if [ -n "$SRC_MAKEFILE" ]; then
+            cp "$SRC_MAKEFILE" package/chan-quectel/Makefile
+          else
+            echo "Error: Makefile not found!"
+            exit 1
           fi
           
-          # Configure and compile
+          # Adapt Makefile dependencies for OpenWrt 23 / Asterisk 20
+          sed -i 's/+asterisk16/+asterisk/g' package/chan-quectel/Makefile
+          sed -i 's/+asterisk18/+asterisk/g' package/chan-quectel/Makefile
+          sed -i 's/+asterisk20/+asterisk/g' package/chan-quectel/Makefile
+          
+          # Configure OpenWrt SDK to select asterisk and chan-quectel
           make defconfig
-          make package/telephony/chan-quectel/compile V=s -j$(nproc)
+          echo "CONFIG_PACKAGE_asterisk=m" >> .config
+          echo "CONFIG_PACKAGE_chan-quectel=m" >> .config
+          make defconfig
+          
+          # Compile
+          make package/chan-quectel/compile V=s -j$(nproc) || make package/chan-quectel/compile V=s -j1
 
       - name: Prepare Artifacts
         run: |
           mkdir -p output_ipk
           find sdk/bin/ -type f -name "*quectel*.ipk" -exec cp {} output_ipk/ \;
-          if [ -z "$(ls -A output_ipk)" ]; then
-            echo "Searching for built .so files directly..."
-            find sdk/build_dir/ -type f -name "chan_quectel.so" -exec cp {} output_ipk/ \;
-          fi
+          find sdk/build_dir/ -type f -name "chan_quectel.so" -exec cp {} output_ipk/ \;
+          ls -la output_ipk/
 
       - name: Upload IPK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: chan-quectel-${{ github.event.inputs.ast_version }}
+          name: chan-quectel-OpenWrt23-MT7621
           path: output_ipk/
