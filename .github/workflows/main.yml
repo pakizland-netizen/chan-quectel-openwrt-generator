@@ -28,7 +28,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      - name: Install host dependencies
         run: |
           sudo apt-get purge -y needrestart || true
           sudo rm -rf /etc/needrestart /usr/lib/needrestart /etc/apt/apt.conf.d/*needrestart*
@@ -43,7 +43,6 @@ jobs:
       - name: Setup OpenWrt SDK and Build chan_quectel
         run: |
           SDK_URL="${{ github.event.inputs.sdk_url }}"
-          AST_VER="${{ github.event.inputs.ast_version }}"
           
           echo "Downloading SDK from: $SDK_URL"
           wget -q "$SDK_URL" -O openwrt-sdk.tar.xz
@@ -52,8 +51,11 @@ jobs:
           tar -xf openwrt-sdk.tar.xz --strip-components=1 -C sdk
           cd sdk
           
-          # Update and install telephony feed specifically for Asterisk headers
-          ./scripts/feeds update packages telephony
+          # Update feeds
+          ./scripts/feeds update -a
+          
+          # Install Asterisk prerequisites and Asterisk itself into feeds
+          ./scripts/feeds install ncurses libedit jansson libxml2 libopenssl alsa-lib
           ./scripts/feeds install -p telephony asterisk
           
           # Setup chan-quectel package directory
@@ -73,13 +75,19 @@ jobs:
           sed -i 's/+asterisk18/+asterisk/g' package/chan-quectel/Makefile
           sed -i 's/+asterisk20/+asterisk/g' package/chan-quectel/Makefile
           
-          # Configure OpenWrt SDK to select asterisk and chan-quectel
+          # Configure OpenWrt SDK
           make defconfig
+          echo "CONFIG_PACKAGE_libncurses=y" >> .config
+          echo "CONFIG_PACKAGE_libedit=y" >> .config
           echo "CONFIG_PACKAGE_asterisk=m" >> .config
           echo "CONFIG_PACKAGE_chan-quectel=m" >> .config
           make defconfig
           
-          # Compile
+          # Explicitly build target ncurses and libedit headers first
+          make package/ncurses/compile V=s -j$(nproc)
+          make package/feeds/packages/libedit/compile V=s -j$(nproc)
+          
+          # Compile chan-quectel
           make package/chan-quectel/compile V=s -j$(nproc) || make package/chan-quectel/compile V=s -j1
 
       - name: Prepare Artifacts
