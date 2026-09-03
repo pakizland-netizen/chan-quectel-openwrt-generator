@@ -19,6 +19,9 @@ env:
 jobs:
   build:
     runs-on: ubuntu-22.04
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      NEEDRESTART_MODE: a
     steps:
       - name: Check out repository code
         uses: actions/checkout@v4
@@ -33,6 +36,7 @@ jobs:
         run: |
           env
           echo ${{ steps.regex-match.outputs.group1 }}
+          sudo apt-get remove -y needrestart || true
           sudo apt update
           sudo apt install -y libncurses5-dev libncursesw5-dev zlib1g-dev gawk gettext libssl-dev xsltproc rsync unzip python-is-python3
           wget -q ${{ github.event.inputs.sdkurl }}
