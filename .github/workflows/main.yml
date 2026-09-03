@@ -3,63 +3,86 @@ name: BuildIpk
 on:
   workflow_dispatch:
     inputs:
-      sdkurl:
+      sdk_url:
+        description: 'OpenWrt SDK URL'
         required: true
-        description: Download url for Openwrt sdk file in tar.xz or tar.zst format
-      astversion:
+        default: 'https://downloads.openwrt.org/releases/22.03.3/targets/ramips/mt7620/openwrt-sdk-22.03.3-ramips-mt7620_gcc-11.2.0_musl.Linux-x86_64.tar.xz'
+      ast_version:
+        description: 'Asterisk Version'
+        required: true
+        default: 'Ast18'
         type: choice
-        description: Choose Asterisk version - make sure it corresponds with Openwrt version chosen
-        options: 
-        - $GITHUB_WORKSPACE/openwrt/urlmakefile/current/Ast20
-        - $GITHUB_WORKSPACE/openwrt/urlmakefile/current/Ast18
-        - $GITHUB_WORKSPACE/openwrt/urlmakefile/current/ast16 
-env:
-  exten: ${{ endsWith( github.event.inputs.sdkurl , 'zst' ) && '.tar.zst' || '.tar.xz'}}
-  zsad: ${{ endsWith( github.event.inputs.sdkurl , 'zst' ) && '--zstd' || ''}}
+        options:
+          - Ast16
+          - Ast18
+          - Ast20
+
 jobs:
   build:
     runs-on: ubuntu-22.04
     env:
       DEBIAN_FRONTEND: noninteractive
-      NEEDRESTART_MODE: a
+      NEEDRESTART_MODE: l
+
     steps:
-      - name: Check out repository code
+      - name: Checkout repository
         uses: actions/checkout@v4
-      - uses: KyoriPowered/action-regex-match@v4
-        id: regex-match
-        with:
-          text: ${{ github.event.inputs.sdkurl }}
-          regex: '^.+openwrt-sdk-([\d]*).*?-([a-z,0-9]*)-.+$'        
-      - name: set env variable
-        run: echo "ver=$(basename ${{ github.event.inputs.astversion }})" >> $GITHUB_ENV
-      - name: Generate ipk
+
+      - name: Install build dependencies
         run: |
-          env
-          echo ${{ steps.regex-match.outputs.group1 }}
-          sudo apt-get remove -y needrestart || true
-          sudo apt update
-          sudo apt install -y libncurses5-dev libncursesw5-dev zlib1g-dev gawk gettext libssl-dev xsltproc rsync unzip python-is-python3
-          wget -q ${{ github.event.inputs.sdkurl }}
-          tar ${{ env.zsad }} -xf $(basename ${{ github.event.inputs.sdkurl }})
-          mv $(basename ${{ github.event.inputs.sdkurl }} ${{ env.exten }}) wrtsdk          
-          echo "src-link cusrepo ${{ github.event.inputs.astversion }}" > wrtsdk/feeds.conf
-          export pkgdir=${{ github.event.inputs.astversion }}
-          cd wrtsdk
-          sed -E '\`luci|routing|freifunk`d' feeds.conf.default >> feeds.conf
-          ./scripts/feeds update -a
-          ./scripts/feeds install asterisk-chan-quectel
-          sed -z -i 's/default ALL/default n/' Config.in
-          sed -z -i 's/default ALL/default n/' Config.in
-          sed -z -i 's/default y/default n/' Config.in
-          sed -z -i 's/default y/default n/' Config.in
+          # Completely purge needrestart and its apt hooks
+          sudo apt-get purge -y needrestart || true
+          sudo rm -rf /etc/needrestart /usr/lib/needrestart /etc/apt/apt.conf.d/*needrestart*
+
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            -o Dpkg::Options::="--force-confdef" \
+            -o Dpkg::Options::="--force-confold" \
+            build-essential libncurses5-dev libncursesw5-dev \
+            zlib1g-dev gawk git gettext libssl-dev xsltproc \
+            rsync wget unzip python3 file
+
+      - name: Setup OpenWrt SDK and Build chan_quectel
+        run: |
+          SDK_URL="${{ github.event.inputs.sdk_url }}"
+          AST_VER="${{ github.event.inputs.ast_version }}"
+          
+          echo "Downloading SDK from: $SDK_URL"
+          wget -q "$SDK_URL" -O openwrt-sdk.tar.xz
+          
+          mkdir sdk
+          tar -xf openwrt-sdk.tar.xz --strip-components=1 -C sdk
+          cd sdk
+          
+          # Update and install feeds
+          ./scripts/feeds update -a || true
+          ./scripts/feeds install -a || true
+          
+          # Setup chan-quectel package directory
+          mkdir -p package/telephony/chan-quectel
+          
+          # Select makefile based on Asterisk version
+          if [ -d "../openwrt/urlmakefile/$AST_VER" ]; then
+            cp -r ../openwrt/urlmakefile/$AST_VER/* package/telephony/chan-quectel/
+          elif [ -d "../openwrt/urlmakefile/current" ]; then
+            cp -r ../openwrt/urlmakefile/current/* package/telephony/chan-quectel/
+          fi
+          
+          # Configure and compile
           make defconfig
-          cat $pkgdir/addpkg >> .config
-          make -j4 V=s
-          cd ..
-          mkdir downloads
-          cp $(find $(pwd)/wrtsdk/bin/ -wholename *cusrepo/*.ipk) downloads/
-      - name: Upload Artifact GitHub Action
+          make package/telephony/chan-quectel/compile V=s -j$(nproc)
+
+      - name: Prepare Artifacts
+        run: |
+          mkdir -p output_ipk
+          find sdk/bin/ -type f -name "*quectel*.ipk" -exec cp {} output_ipk/ \;
+          if [ -z "$(ls -A output_ipk)" ]; then
+            echo "Searching for built .so files directly..."
+            find sdk/build_dir/ -type f -name "chan_quectel.so" -exec cp {} output_ipk/ \;
+          fi
+
+      - name: Upload IPK Artifact
         uses: actions/upload-artifact@v4
-        with: 
-          name: chan-quectel-openwrt${{ steps.regex-match.outputs.group1 }}-${{ steps.regex-match.outputs.group2 }}
-          path: downloads
+        with:
+          name: chan-quectel-${{ github.event.inputs.ast_version }}
+          path: output_ipk/
