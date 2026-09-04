@@ -6,7 +6,7 @@ on:
       sdk_url:
         description: 'OpenWrt SDK URL'
         required: true
-        default: 'https://downloads.openwrt.org/releases/23.05.0-rc3/targets/ramips/mt7621/openwrt-sdk-23.05.0-rc3-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz'
+        default: 'https://downloads.openwrt.org/releases/25.12.3/targets/ramips/mt7621/openwrt-sdk-25.12.3-ramips-mt7621_musl.Linux-x86_64.tar.xz'
       ast_version:
         description: 'Asterisk Version'
         required: true
@@ -51,17 +51,15 @@ jobs:
           tar -xf openwrt-sdk.tar.xz --strip-components=1 -C sdk
           cd sdk
           
-          # Update all feeds
-          ./scripts/feeds update -a
+          # Update feeds quietly
+          ./scripts/feeds update -a > /dev/null 2>&1
           
-          # Install core prerequisites & Asterisk development headers
+          # Install required feeds
           ./scripts/feeds install ncurses libedit jansson libxml2 libopenssl alsa-lib libusb
           ./scripts/feeds install -p telephony asterisk
           
           # Setup chan-quectel package directory
           mkdir -p package/chan-quectel
-          
-          # Locate and copy Makefile directly into package/chan-quectel
           SRC_MAKEFILE=$(find ../openwrt/urlmakefile/ -name "Makefile" | head -n 1)
           if [ -n "$SRC_MAKEFILE" ]; then
             cp "$SRC_MAKEFILE" package/chan-quectel/Makefile
@@ -70,13 +68,11 @@ jobs:
             exit 1
           fi
           
-          # Fix dependencies for OpenWrt 23:
-          # 1. replace asterisk16/18/20 with asterisk
-          # 2. replace libusb-1.0 with libusb (if present)
+          # Adapt dependencies for OpenWrt 23 / Asterisk 20
           sed -i 's/+asterisk[0-9]*/+asterisk/g' package/chan-quectel/Makefile
           sed -i 's/+libusb-1.0/+libusb/g' package/chan-quectel/Makefile
           
-          # Configure OpenWrt SDK
+          # Configure SDK
           make defconfig
           echo "CONFIG_PACKAGE_libncurses=y" >> .config
           echo "CONFIG_PACKAGE_libedit=y" >> .config
@@ -85,13 +81,18 @@ jobs:
           echo "CONFIG_PACKAGE_chan-quectel=m" >> .config
           make defconfig
           
-          # Compile pre-requisite host & target packages
-          make package/ncurses/compile V=s -j$(nproc)
-          make package/feeds/packages/libusb/compile V=s -j$(nproc) || true
-          make package/feeds/packages/libedit/compile V=s -j$(nproc)
+          # Build target libraries quietly (to avoid log truncation)
+          echo "Compiling system prerequisites..."
+          make package/ncurses/compile -j$(nproc) > /dev/null 2>&1 || true
+          make package/feeds/packages/libedit/compile -j$(nproc) > /dev/null 2>&1 || true
           
-          # Compile chan-quectel directly
-          make package/chan-quectel/compile V=s -j$(nproc) || make package/chan-quectel/compile V=s -j1
+          # Build Asterisk headers
+          echo "Compiling Asterisk headers..."
+          make package/feeds/telephony/asterisk/compile -j$(nproc) > /dev/null 2>&1 || true
+          
+          # Compile chan-quectel with verbose logging
+          echo "Compiling chan-quectel..."
+          make package/chan-quectel/compile V=s -j1
 
       - name: Prepare Artifacts
         run: |
