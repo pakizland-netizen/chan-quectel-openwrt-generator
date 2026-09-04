@@ -35,23 +35,28 @@ jobs:
           
           # Clone asterisk source for include headers
           git clone --depth 1 -b 20 https://github.com/asterisk/asterisk.git ast_src
+          
+          # Generate autoconfig.h required by asterisk headers
+          cd ast_src
+          ./configure --without-ssl --without-crypto --without-jansson || true
 
       - name: Compile chan_quectel.so
         run: |
-          # Find cross-compiler path in SDK
-          TOOLCHAIN_BIN=$(find $(pwd)/sdk/staging_dir/ -maxdepth 2 -type d -name "bin" | grep toolchain | head -n 1)
+          # Set STAGING_DIR to silence GCC warning and locate tools
+          export STAGING_DIR="$(pwd)/sdk/staging_dir"
+          TOOLCHAIN_BIN=$(find "$STAGING_DIR" -maxdepth 2 -type d -name "bin" | grep toolchain | head -n 1)
           export PATH="$TOOLCHAIN_BIN:$PATH"
           CROSS_CC=$(which mipsel-openwrt-linux-musl-gcc || which mipsel-openwrt-linux-gcc)
           
           echo "Using Compiler: $CROSS_CC"
-          $CROSS_CC -v
           
           cd src_quectel
           
-          # Compile chan_quectel.so directly using cross-compiler
+          # Compile chan_quectel.so with Asterisk include paths
           $CROSS_CC -O2 -pipe -mno-branch-likely -mips32r2 -mtune=24kc -fPIC -shared \
             -D_GNU_SOURCE \
             -I../ast_src/include \
+            -I../ast_src/main \
             -I./ \
             chan_quectel.c \
             -o chan_quectel.so
