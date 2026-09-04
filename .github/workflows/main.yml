@@ -1,108 +1,66 @@
-name: BuildIpk
+name: Build chan_quectel for OpenWrt 25
 
 on:
   workflow_dispatch:
     inputs:
       sdk_url:
-        description: 'OpenWrt SDK URL'
+        description: 'Direct Download URL of SDK (.tar.zst)'
         required: true
-        default: 'https://downloads.openwrt.org/releases/25.12.3/targets/ramips/mt7621/openwrt-sdk-25.12.3-ramips-mt7621_gcc-14.3.0_musl.Linux-x86_64.tar.zst'
-      ast_version:
-        description: 'Asterisk Version'
-        required: true
-        default: 'Ast20'
-        type: choice
-        options:
-          - Ast16
-          - Ast18
-          - Ast20
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-    env:
-      DEBIAN_FRONTEND: noninteractive
-      NEEDRESTART_MODE: l
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install host dependencies
+      - name: Install build tools
         run: |
           sudo apt-get purge -y needrestart || true
-          sudo rm -rf /etc/needrestart /usr/lib/needrestart /etc/apt/apt.conf.d/*needrestart*
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            -o Dpkg::Options::="--force-confdef" \
-            -o Dpkg::Options::="--force-confold" \
-            build-essential libncurses5-dev libncursesw5-dev \
-            zlib1g-dev gawk git gettext libssl-dev xsltproc \
-            rsync wget unzip python3 file
+            build-essential zstd wget file
 
-      - name: Setup OpenWrt SDK and Build chan_quectel
+      - name: Download & Extract OpenWrt SDK
         run: |
-          SDK_URL="${{ github.event.inputs.sdk_url }}"
-          
-          echo "Downloading SDK from: $SDK_URL"
-          wget -q "$SDK_URL" -O openwrt-sdk.tar.xz
-          
+          echo "Downloading SDK..."
+          wget -q "${{ github.event.inputs.sdk_url }}" -O sdk.tar.zst
           mkdir sdk
-          tar -xf openwrt-sdk.tar.xz --strip-components=1 -C sdk
-          cd sdk
-          
-          # Update feeds quietly
-          ./scripts/feeds update -a > /dev/null 2>&1
-          
-          # Install required feeds
-          ./scripts/feeds install ncurses libedit jansson libxml2 libopenssl alsa-lib libusb
-          ./scripts/feeds install -p telephony asterisk
-          
-          # Setup chan-quectel package directory
-          mkdir -p package/chan-quectel
-          SRC_MAKEFILE=$(find ../openwrt/urlmakefile/ -name "Makefile" | head -n 1)
-          if [ -n "$SRC_MAKEFILE" ]; then
-            cp "$SRC_MAKEFILE" package/chan-quectel/Makefile
-          else
-            echo "Error: Makefile not found!"
-            exit 1
-          fi
-          
-          # Adapt dependencies for OpenWrt 23 / Asterisk 20
-          sed -i 's/+asterisk[0-9]*/+asterisk/g' package/chan-quectel/Makefile
-          sed -i 's/+libusb-1.0/+libusb/g' package/chan-quectel/Makefile
-          
-          # Configure SDK
-          make defconfig
-          echo "CONFIG_PACKAGE_libncurses=y" >> .config
-          echo "CONFIG_PACKAGE_libedit=y" >> .config
-          echo "CONFIG_PACKAGE_libusb=y" >> .config
-          echo "CONFIG_PACKAGE_asterisk=m" >> .config
-          echo "CONFIG_PACKAGE_chan-quectel=m" >> .config
-          make defconfig
-          
-          # Build target libraries quietly (to avoid log truncation)
-          echo "Compiling system prerequisites..."
-          make package/ncurses/compile -j$(nproc) > /dev/null 2>&1 || true
-          make package/feeds/packages/libedit/compile -j$(nproc) > /dev/null 2>&1 || true
-          
-          # Build Asterisk headers
-          echo "Compiling Asterisk headers..."
-          make package/feeds/telephony/asterisk/compile -j$(nproc) > /dev/null 2>&1 || true
-          
-          # Compile chan-quectel with verbose logging
-          echo "Compiling chan-quectel..."
-          make package/chan-quectel/compile V=s -j1
+          tar --zstd -xf sdk.tar.zst --strip-components=1 -C sdk
 
-      - name: Prepare Artifacts
+      - name: Download chan-quectel source & Asterisk headers
         run: |
-          mkdir -p output_ipk
-          find sdk/bin/ -type f -name "*quectel*.ipk" -exec cp {} output_ipk/ \;
-          find sdk/build_dir/ -type f -name "chan_quectel.so" -exec cp {} output_ipk/ \;
-          ls -la output_ipk/
+          # Clone latest chan-quectel source
+          git clone https://github.com/IchthysMaranatha/asterisk-chan-quectel.git src_quectel
+          
+          # Clone asterisk source for include headers
+          git clone --depth 1 -b 20 https://github.com/asterisk/asterisk.git ast_src
 
-      - name: Upload IPK Artifact
+      - name: Compile chan_quectel.so
+        run: |
+          # Find cross-compiler path in SDK
+          TOOLCHAIN_BIN=$(find $(pwd)/sdk/staging_dir/ -maxdepth 2 -type d -name "bin" | grep toolchain | head -n 1)
+          export PATH="$TOOLCHAIN_BIN:$PATH"
+          CROSS_CC=$(which mipsel-openwrt-linux-musl-gcc || which mipsel-openwrt-linux-gcc)
+          
+          echo "Using Compiler: $CROSS_CC"
+          $CROSS_CC -v
+          
+          cd src_quectel
+          
+          # Compile chan_quectel.so directly using cross-compiler
+          $CROSS_CC -O2 -pipe -mno-branch-likely -mips32r2 -mtune=24kc -fPIC -shared \
+            -D_GNU_SOURCE \
+            -I../ast_src/include \
+            -I./ \
+            chan_quectel.c \
+            -o chan_quectel.so
+            
+          ls -lh chan_quectel.so
+          file chan_quectel.so
+
+      - name: Upload chan_quectel.so Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: chan-quectel-OpenWrt23-MT7621
-          path: output_ipk/
+          name: chan_quectel-OpenWrt25-MT7621
+          path: src_quectel/chan_quectel.so
